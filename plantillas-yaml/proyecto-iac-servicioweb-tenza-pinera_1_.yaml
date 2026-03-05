@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Network Template: Sample template that creates a VPC with 2 public subnets and a docker instance EC2.
+
+
+######################
+# Resources section
+######################
+
+Resources:
+
+  ## VPC
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: 192.168.0.0/16
+      Tags:
+        - Key: Name
+          Value: "proyecto-vpc"
+      
+  ## Internet Gateway
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  
+  ## Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  
+  ## Public Subnet
+  
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 192.168.1.0/24
+      # MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs 
+          Ref: AWS::Region
+      Tags:
+        - Key: Name
+          Value: "public-subnet-1"
+  
+  # PublicSubnet2:
+  #   Type: AWS::EC2::Subnet
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     CidrBlock: 192.168.2.0/24
+  #     # MapPublicIpOnLaunch: true
+  #     AvailabilityZone: !Select 
+  #       - 1
+  #       - !GetAZs 
+  #         Ref: AWS::Region
+  #     Tags:
+  #       - Key: Name
+  #         Value: "public-subnet-2"
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+  
+  # PublicSubnetRouteTableAssociation2:
+  #   Type: AWS::EC2::SubnetRouteTableAssociation
+  #   Properties:
+  #     SubnetId: !Ref PublicSubnet2
+  #     RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      NetworkAclId: !GetAtt 
+        - VPC
+        - DefaultNetworkAcl
+ 
+  # PublicSubnetNetworkAclAssociation2:
+  #   Type: AWS::EC2::SubnetNetworkAclAssociation
+  #   Properties:
+  #     SubnetId: !Ref PublicSubnet2
+  #     NetworkAclId: !GetAtt 
+  #       - VPC
+  #       - DefaultNetworkAcl
+
+  # ## Private subnets 
+  # PrivateSubnet1:
+  #   Type: AWS::EC2::Subnet
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     CidrBlock: 192.168.3.0/24
+  #     AvailabilityZone: !Select 
+  #       - 0
+  #       - !GetAZs 
+  #         Ref: AWS::Region
+  #     Tags:
+  #       - Key: Name
+  #         Value: privatesubnet1
+  
+  # PrivateSubnet2:
+  #   Type: AWS::EC2::Subnet
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     CidrBlock: 192.168.4.0/24
+  #     AvailabilityZone: !Select 
+  #       - 1
+  #       - !GetAZs 
+  #         Ref: AWS::Region
+  #     Tags:
+  #       - Key: Name
+  #         Value: privatesubnet2
+
+  # NatGatewayIP:
+  #   Type: AWS::EC2::EIP
+  #   DependsOn: VPCGatewayAttachment
+  #   Properties:
+  #     Domain: vpc
+ 
+  # NatGateway:
+  #   Type: AWS::EC2::NatGateway
+  #   Properties:
+  #     AllocationId: !GetAtt NatGatewayIP.AllocationId
+  #     SubnetId: !Ref PublicSubnet
+
+  # PrivateRouteTable1:
+  #   Type: AWS::EC2::RouteTable
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     Tags:
+  #       - Key: Name
+  #         Value: privateroutetable1
+
+  # DefaultPrivateRoute1:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId: !Ref PrivateRouteTable1
+  #     DestinationCidrBlock: 0.0.0.0/0
+  #     NatGatewayId: !Ref NatGateway
+
+  # PrivateSubnet1RouteTableAssociation:
+  #   Type: AWS::EC2::SubnetRouteTableAssociation
+  #   Properties:
+  #     RouteTableId: !Ref PrivateRouteTable1
+  #     SubnetId: !Ref PrivateSubnet1
+
+  # PrivateRouteTable2:
+  #   Type: AWS::EC2::RouteTable
+  #   Properties:
+  #     VpcId: !Ref VPC
+  #     Tags:
+  #       - Key: Name
+  #         Value: private-route-table2
+
+  # DefaultPrivateRoute2:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId: !Ref PrivateRouteTable2
+  #     DestinationCidrBlock: 0.0.0.0/0
+  #     NatGatewayId: !Ref NatGateway
+
+  # PrivateSubnet2RouteTableAssociation:
+  #   Type: AWS::EC2::SubnetRouteTableAssociation
+  #   Properties:
+  #     RouteTableId: !Ref PrivateRouteTable2
+  #     SubnetId: !Ref PrivateSubnet2
+
+  DockerInstance:
+    Type: AWS::EC2::Instance
+   
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-08a0d1e16fc3f61ea
+      KeyName: dockerInstance-keypair
+      IamInstanceProfile: LabInstanceProfile
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref FlaskSecurityGroup
+          AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          DeleteOnTermination: true
+          SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: DockerInstance
+      UserData:
+        Fn::Base64: !Sub | 
+          #!/bin/bash
+          dnf update -y
+          #install Docker
+          dnf -y install docker
+
+  DiskVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 100
+      AvailabilityZone: !GetAtt DockerInstance.AvailabilityZone
+    DeletionPolicy: Snapshot
+
+  DiskMountPoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref DockerInstance
+      VolumeId: !Ref DiskVolume
+      Device: /dev/sdh
+
+  FlaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable TCP ingress for Flask
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Flask Security Group
+
+  # BalanceadorSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: Enable TCP ingress for Flask
+  #     VpcId: !Ref VPC
+  #     SecurityGroupIngress:
+  #       - IpProtocol: tcp
+  #         FromPort: 5000
+  #         ToPort: 5000
+  #         CidrIp: 0.0.0.0/0
+  #     Tags:
+  #       - Key: Name
+  #         Value: BalanceadorSecurityGroup
+
+
+  # TaskSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   DependsOn: BalanceadorSecurityGroup
+  #   Properties:
+  #     GroupDescription: Enable traffic from ALB SG
+  #     VpcId: !Ref VPC
+  #     SecurityGroupIngress:
+  #       - IpProtocol: tcp
+  #         FromPort: 5000
+  #         ToPort: 5000
+  #         SourceSecurityGroupId: !Ref BalanceadorSecurityGroup
+  #     Tags:
+  #       - Key: Name
+  #         Value: TaskSecurityGroup
+  
+
+
+######################
+# Outputs section
+######################
+
+Outputs:
+  
+  PublicSubnet:
+    Description: The subnet ID to use for public web servers 1
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub '${AWS::StackName}-Subnet1ID'
+
+  PublicSubnet2:
+    Description: The subnet ID to use for public web servers 2
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub '${AWS::StackName}-Subnet2ID'
+
+  DockerInstance:
+    Description: EC2 instance ID
+    Value: !Ref DockerInstance
+
+  VPC:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPCID'

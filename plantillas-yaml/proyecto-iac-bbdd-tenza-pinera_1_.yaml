@@ -1,0 +1,360 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  # Bucket S3
+  S3BucketProyecto:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: deposito-proyecto
+    
+  # Tabla DynamoDB Datos-Crudos
+  DatosCrudosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Datos-Crudos
+      AttributeDefinitions:
+        - AttributeName: Fecha
+          AttributeType: S
+        - AttributeName: MonthYear
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Fecha
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: MonthYear-index
+          KeySchema:
+            - AttributeName: MonthYear
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # Tabla DynamoDB Datos-Metricas
+  DatosMetricas:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Metrics
+      AttributeDefinitions:
+        - AttributeName: MonthYear
+          AttributeType: S
+      KeySchema:
+        - AttributeName: MonthYear
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # Función Lambda funcion-A
+  FuncionTablaDatos:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: funcion-datos
+      Runtime: python3.12
+      Role: arn:aws:iam::669437870641:role/LabRole
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+        import boto3
+        import json
+        import urllib.parse
+        import csv
+        from decimal import Decimal
+        from datetime import datetime
+
+        s3 = boto3.resource('s3')
+        dynamodb = boto3.resource('dynamodb')
+
+        table_raw = dynamodb.Table('Datos-Crudos')
+
+        def lambda_handler(event, context):
+            # Registramos el evento que activa la función Lambda
+            print("Evento recibido por la función Lambda: " + json.dumps(event, indent=2))
+
+            # Extraemos el nombre del bucket y la clave del archivo desde el evento
+            bucket = event['Records'][0]['s3']['bucket']['name']
+            key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'])
+            local_filename = '/tmp/data.csv'  # Especificamos una ubicación temporal para el archivo
+
+            # Intentamos descargar el archivo CSV desde el bucket de S3
+            try:
+                s3.meta.client.download_file(bucket, key, local_filename)
+                print(f'Archivo {key} descargado desde el bucket {bucket}')
+            except Exception as e:
+                print(f'Error al descargar el archivo: {e}')
+                raise e  # Detenemos la ejecución si no podemos descargar el archivo
+
+            # Leemos y procesamos el archivo CSV para cargar datos en DynamoDB
+            try:
+                with open(local_filename, encoding='utf-8') as csvfile:
+                    reader = csv.DictReader(csvfile)  # Leemos cada fila del archivo como un diccionario
+                    with table_raw.batch_writer() as batch:
+                        for row in reader:
+                            try:
+                                # Registramos la fila que estamos procesando
+                                print(f"Procesamos la fila: {row['Fecha']}")
+
+                                # Transformamos y preparamos los datos necesarios
+                                date = datetime.strptime(row['Fecha'], '%Y/%m/%d')
+                                month_year = date.strftime('%Y-%m')
+                                media = Decimal(row['Medias'])
+                                deviation = Decimal(row['Desviaciones'])
+
+                                # Construimos el ítem que vamos a cargar en DynamoDB
+                                raw_item = {
+                                    'Fecha': row['Fecha'],
+                                    'MonthYear': month_year,
+                                    'Media': media,
+                                    'Deviation': deviation,
+                                }
+
+                                # Insertamos el ítem en la tabla de DynamoDB
+                                batch.put_item(Item=raw_item)
+                                print(f"Ítem añadido: {raw_item}")
+
+                            except Exception as e:
+                                # Registramos cualquier error al procesar una fila y continuamos
+                                print(f"Error al procesar la fila {row['Fecha']}: {e}")
+                                continue
+
+                print("¡Datos cargados exitosamente en DynamoDB!")
+            except Exception as e:
+                # Registramos cualquier error al procesar el archivo CSV
+                print(f"Error al procesar el archivo CSV: {e}")
+                raise e
+
+
+
+  # Función Lambda funcion-B
+  FuncionTablaMetricas:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: funcion-tabla-metricas
+      Runtime: python3.12
+      Role: arn:aws:iam::669437870641:role/LabRole
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          from datetime import datetime, timedelta
+          from decimal import Decimal
+          from boto3.dynamodb.conditions import Key
+
+          # Conectamos con los recursos de DynamoDB
+          dynamodb = boto3.resource('dynamodb')
+          table_raw = dynamodb.Table('Datos-Crudos')  # Tabla que contiene los datos crudos
+          table_metrics = dynamodb.Table('Metrics')  # Tabla que almacenará las métricas calculadas
+
+          def lambda_handler(event, context):
+              # Registramos el evento recibido por la función Lambda
+              print("Evento recibido por la función Lambda: " + json.dumps(event, indent=2))
+
+              # Utilizamos un `batch_writer` para realizar escrituras por lotes en DynamoDB
+              with table_metrics.batch_writer() as batch:
+                  processed_month_years = set()  # Conjunto para evitar procesar duplicados del mismo mes-año
+
+                  try:
+                      # Iteramos sobre los registros del evento
+                      for record in event['Records']:
+                          newImage = record['dynamodb'].get('NewImage', None)  # Verificamos si existe una nueva imagen
+                          if newImage: 
+                              # Extraemos los datos del registro
+                              new_item = record['dynamodb']['NewImage']
+                              month_year = new_item['MonthYear']['S']  # Obtenemos el mes-año del registro
+
+                              # Saltamos el procesamiento si ya hemos manejado este mes-año
+                              if month_year in processed_month_years:
+                                  continue
+                              
+                              processed_month_years.add(month_year)  # Marcamos este mes-año como procesado
+
+                              # Consultamos los datos del mes-año en la tabla `Datos-Crudos`
+                              response = table_raw.query(
+                                  IndexName='MonthYear-index',  # Índice secundario que permite buscar por MonthYear
+                                  KeyConditionExpression=Key('MonthYear').eq(month_year)
+                              )
+                              monthly_data = response['Items']  # Obtenemos los ítems de la consulta
+
+                              # Calculamos las métricas del mes actual
+                              total_media = sum(Decimal(item['Media']) for item in monthly_data)  # Suma total de las medias
+                              max_deviation = max(Decimal(item['Deviation']) for item in monthly_data)  # Máxima desviación
+                              max_temperature = max(Decimal(item['Media']) for item in monthly_data)  # Máxima temperatura
+                              record_count = len(monthly_data)  # Contamos los registros del mes
+                              average_media = total_media / record_count if record_count > 0 else 0  # Calculamos el promedio
+
+                              # Calculamos el mes-año anterior
+                              current_date = datetime.strptime(month_year + '-01', '%Y-%m-%d')  # Convertimos el mes-año a fecha
+                              previous_month_year = (current_date.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')  # Mes anterior
+
+                              # Consultamos los datos del mes-año anterior
+                              previous_response = table_raw.query(
+                                  IndexName='MonthYear-index',
+                                  KeyConditionExpression=Key('MonthYear').eq(previous_month_year)
+                              )
+                              previous_month_data = previous_response['Items']
+                              
+                              # Calculamos la temperatura máxima del mes anterior (si existen datos)
+                              max_temperature_previous = max(
+                                  Decimal(item['Media']) for item in previous_month_data
+                              ) if previous_month_data else None
+
+                              # Calculamos la diferencia de temperatura entre el mes actual y el anterior
+                              temperature_difference = (
+                                  max_temperature - max_temperature_previous
+                                  if max_temperature_previous is not None
+                                  else None
+                              )
+
+                              # Construimos el ítem para la tabla `Metrics`
+                              metrics_item = {
+                                  'MonthYear': month_year,
+                                  'AverageMedia': round(average_media, 2),  # Promedio de las medias
+                                  'MaxDeviation': round(max_deviation, 2),  # Máxima desviación
+                                  'TemperatureDifference': round(temperature_difference, 2) if temperature_difference is not None else None,  # Diferencia de temperatura
+                              }
+
+                              # Insertamos el ítem en la tabla `Metrics`
+                              batch.put_item(Item=metrics_item)
+                              print(f'Datos mensuales actualizados en Metrics: {metrics_item}')
+
+                  except Exception as e:
+                      # Registramos el error si ocurre algún problema durante el procesamiento
+                      print(e)
+                      print("Error al procesar el evento del trigger de DynamoDB.")
+                      raise e
+
+
+  # Desencadenador de DynamoDB Streams para Lambda B
+  DynamoDBStreamLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FuncionTablaMetricas
+      Action: lambda:InvokeFunction
+      Principal: dynamodb.amazonaws.com
+      SourceArn: !GetAtt DatosCrudosTable.StreamArn
+
+  LambdaBEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt DatosCrudosTable.StreamArn
+      FunctionName: !Ref FuncionTablaMetricas
+      StartingPosition: LATEST
+
+  # Tema SNS
+  TemperatureAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: TemperatureAlert
+
+  # Suscripción al tema SNS
+  TemperatureAlertSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: pineratenza@gmail.com
+      TopicArn: !Ref TemperatureAlertTopic
+
+  # Función Lambda funcion-notificacion
+  FuncionNotificacion:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: funcion-notificacion
+      Runtime: python3.12
+      Role: arn:aws:iam::669437870641:role/LabRole
+      Handler: index.lambda_handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref TemperatureAlertTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              # Registramos el evento recibido por la función Lambda
+              print("Evento recibido por la función Lambda:", json.dumps(event, indent=2))
+
+              # Inicializamos el cliente de SNS
+              sns = boto3.client('sns')
+              sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+
+              # Creamos una lista para acumular las alertas encontradas
+              alerts = []
+
+              try:
+                  # Iteramos sobre los registros recibidos en el evento
+                  for record in event['Records']:
+                      # Extraemos la nueva imagen del registro
+                      new_image = record['dynamodb'].get('NewImage', None)
+
+                      # Verificamos si la nueva imagen contiene los campos 'Deviation' y 'Fecha'
+                      if new_image and 'Deviation' in new_image and 'Fecha' in new_image:
+                          try:
+                              # Convertimos la desviación a tipo float y extraemos la fecha
+                              deviation = float(new_image['Deviation']['N'])
+                              fecha = new_image['Fecha']['S']
+
+                              # Verificamos si la desviación excede el umbral de 0.5
+                              if deviation > 0.5:
+                                  # Agregamos una alerta a la lista
+                                  alerts.append(f"Fecha: {fecha}, Desviación: {deviation}")
+                          
+                          except ValueError:
+                              # Registramos un error si no podemos convertir la desviación a float
+                              print("Error: No se pudo convertir el valor de 'Deviation' a float.")
+                      else:
+                          # Registramos una advertencia si no se encuentran los campos necesarios
+                          print("Advertencia: No se encontró 'Deviation' o 'Fecha' en la nueva imagen.")
+
+                  # Si encontramos alertas, construimos y enviamos un mensaje consolidado
+                  if alerts:
+                      message = (
+                          "¡Alerta de Temperatura!\n\n"
+                          "Se han detectado desviaciones semanales que exceden el umbral de 0.5:\n\n"
+                          + "\n".join(alerts)
+                      )
+
+                      # Registramos el mensaje que vamos a enviar
+                      print("Enviando alerta consolidada:", message)
+
+                      # Publicamos el mensaje en el tópico de SNS
+                      sns.publish(
+                          TopicArn=sns_topic_arn,
+                          Message=message,
+                          Subject='Resumen de Alertas de Temperatura',
+                      )
+
+                  # Devolvemos una respuesta con el número de registros procesados y alertas encontradas
+                  return {
+                      'statusCode': 200,
+                      'body': f'Se procesaron exitosamente {len(event["Records"])} registros. '
+                              f'Se encontraron {len(alerts)} desviaciones que exceden el umbral.'
+                  }
+
+              except Exception as e:
+                  # Registramos cualquier error que ocurra durante el procesamiento
+                  print(f"Error al procesar los registros: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': f"Error al procesar el evento: {str(e)}"
+                  }
+
+
+  # Permiso para que DynamoDB invoque la función Lambda
+  DynamoDBStreamLambdaPermissionNotification:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FuncionNotificacion
+      Action: lambda:InvokeFunction
+      Principal: dynamodb.amazonaws.com
+      SourceArn: !GetAtt DatosCrudosTable.StreamArn
+
+  # Mapeo de fuente de eventos para conectar DynamoDB Streams con la función Lambda
+  LambdaNotificationEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt DatosCrudosTable.StreamArn
+      FunctionName: !Ref FuncionNotificacion
+      StartingPosition: LATEST
+
+
